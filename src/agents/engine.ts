@@ -61,11 +61,12 @@ function addFeed(entry: FeedEntry): void {
 }
 
 async function refreshAgentStates(): Promise<void> {
+  const oldAgents = [...state.agents];
   state.agents = [];
   for (const role of AGENT_ROLES) {
     const address = getAgentAddress(role);
     const balance = await getBalance(address);
-    const existing = state.agents.find(a => a.role === role);
+    const existing = oldAgents.find(a => a.role === role);
     state.agents.push({
       role,
       address,
