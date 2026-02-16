@@ -3443,6 +3443,8 @@ function animate() {
   checkMasterAppearance();
   animateMaster(t);
   updateEmojiSprites(dt);
+  updateWinText(t);
+  updateOtherPlayers(dt);
   updateFloatingChats(dt);
   updateTeaSession(dt, t);
   checkAttackMission();
@@ -5953,53 +5955,6 @@ function stopSpectating() {
 window.stopSpectating = stopSpectating;
 
 // ============================================================
-// ============================================================
-// CHALLENGE NOTIFICATIONS — BEAM BATTLE only
-// ============================================================
-let challengesInitialized = false;
-let knownOpenChallenges = new Set();
-
-function showFightNotification(ch) {
-  const stack = document.getElementById('notif-stack');
-  if (!stack) return;
-
-  const notif = document.createElement('div');
-  notif.className = 'notif';
-  notif.innerHTML = `
-    <div class="notif-header">
-      <span class="notif-type">BEAM BATTLE</span>
-      <span class="notif-bet">${ch.bet.toFixed(4)} MON</span>
-    </div>
-    <div class="notif-body"><span class="p-name">${ch.creator}</span> challenges you!</div>
-    <div class="notif-action">Click to accept &amp; fight &gt;&gt;</div>
-  `;
-  notif.addEventListener('click', () => {
-    notif.remove();
-    window.acceptChallenge(ch.id);
-  });
-
-  stack.appendChild(notif);
-  setTimeout(() => { if (notif.parentNode) notif.remove(); }, 8000);
-}
-
-function checkNewChallenges() {
-  const open = challengeData.filter(c => c.status === 'OPEN');
-
-  if (!challengesInitialized) {
-    challengesInitialized = true;
-    knownOpenChallenges = new Set(open.map(c => c.id));
-    return;
-  }
-
-  for (const ch of open) {
-    if (!knownOpenChallenges.has(ch.id) && ch.creator !== 'YOU') {
-      showFightNotification(ch);
-    }
-  }
-  knownOpenChallenges = new Set(open.map(c => c.id));
-}
-
-// ============================================================
 // CHARACTER PORTRAIT RENDERER
 // ============================================================
 const portraitCache = {};
@@ -6115,7 +6070,6 @@ function startChallengePoll() {
     try {
       const r = await fetch('/api/challenges');
       challengeData = await r.json();
-      checkNewChallenges();
 
       if (spectatingChallenge) {
         const ch = challengeData.find(c => c.id === spectatingChallenge);
@@ -6220,6 +6174,227 @@ async function fetchActivity() {
 
 fetchActivity();
 setInterval(fetchActivity, 4000);
+
+// ============================================================
+// RED WIN TEXT + GLOBAL EMOJI
+// ============================================================
+let lastArenaWinner = null;
+let winTextSprite = null;
+
+// Red floating 3D win text
+function showWinText(winnerName) {
+  if (winTextSprite) { winTextSprite.remove(); winTextSprite = null; }
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0)';
+  ctx.fillRect(0, 0, 512, 128);
+  ctx.fillStyle = '#ff2222';
+  ctx.font = 'bold 52px monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#ff0000';
+  ctx.shadowBlur = 20;
+  ctx.fillText(`${winnerName} WON!`, 256, 75);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false });
+  winTextSprite = new THREE.Sprite(mat);
+  winTextSprite.scale.set(16, 4, 1);
+  winTextSprite.position.set(ARENA_ROOM_POS.x, 12, ARENA_ROOM_POS.z); // above arena center
+  scene.add(winTextSprite);
+  winTextSprite._spawnTime = performance.now() / 1000;
+}
+
+function updateWinText(t) {
+  if (!winTextSprite) return;
+  const age = t - winTextSprite._spawnTime;
+  winTextSprite.position.y = 12 + Math.sin(age * 1.5) * 1.5;
+  winTextSprite.material.opacity = Math.max(0, 1 - age / 8);
+  if (age > 8) { winTextSprite.removeFromParent(); winTextSprite = null; }
+}
+
+// Poll arena room for wins
+async function pollArenaRoom() {
+  try {
+    const r = await fetch('/api/v1/rooms/room_main');
+    const data = await r.json();
+    if (data.lastWinner && data.lastWinner.name !== lastArenaWinner) {
+      lastArenaWinner = data.lastWinner.name;
+      showWinText(lastArenaWinner);
+      showMsg(`${lastArenaWinner} WON THE ARENA!`);
+    }
+  } catch (e) { /* silent */ }
+}
+setInterval(pollArenaRoom, 3000);
+
+
+// Global emoji sender — works everywhere, broadcasts to arena
+async function sendGlobalEmoji(emoji) {
+  // Spawn from player position
+  spawnEmojiSprite({ x: player.x, y: player.y, z: player.z }, emoji);
+
+  // If visiting an NPC, also send to them
+  if (visitingNPC) {
+    sendNPCEmoji(emoji);
+    return;
+  }
+
+  // Broadcast to arena
+  try {
+    const r = await fetch('/api/emoji/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emoji, from: state?.playerProfile?.displayName || 'YOU' })
+    });
+    const data = await r.json();
+    // Thomas responds with emoji
+    if (data.thomasEmoji) {
+      setTimeout(() => {
+        spawnEmojiSprite({ x: ARENA_ROOM_POS.x, y: 3, z: ARENA_ROOM_POS.z }, data.thomasEmoji);
+      }, 500);
+    }
+    // AI Master responds with emoji — best buddies
+    if (data.masterEmoji) {
+      const mc = getActiveMaster();
+      const masterPos = mc ? { x: mc.group.position.x, y: mc.group.position.y + 4, z: mc.group.position.z } : { x: 0, y: 5, z: 0 };
+      setTimeout(() => {
+        spawnEmojiSprite(masterPos, data.masterEmoji);
+        if (data.masterText) showMsg(`AI MASTER: ${data.masterText}`);
+      }, 800);
+      // Emoji war — rapid fire multiple emojis
+      if (data.isEmojiWar && data.masterWarEmojis) {
+        data.masterWarEmojis.forEach((e, i) => {
+          setTimeout(() => spawnEmojiSprite(masterPos, e), 800 + (i + 1) * 300);
+        });
+      }
+    }
+  } catch (e) { /* silent */ }
+}
+window.sendGlobalEmoji = sendGlobalEmoji;
+
+// Poll for other players' emojis in the arena
+let lastEmojiTime = 0;
+async function pollArenaEmojis() {
+  try {
+    const r = await fetch(`/api/emoji/recent?since=${lastEmojiTime}`);
+    const data = await r.json();
+    if (data.emojis) {
+      for (const e of data.emojis) {
+        if (e.t <= lastEmojiTime) continue;
+        lastEmojiTime = e.t;
+        // Show emojis from OTHER players near arena center
+        if (e.from !== (state?.playerProfile?.displayName || 'YOU')) {
+          const rx = ARENA_ROOM_POS.x + (Math.random() - 0.5) * 8;
+          const rz = ARENA_ROOM_POS.z + (Math.random() - 0.5) * 8;
+          spawnEmojiSprite({ x: rx, y: 1, z: rz }, e.emoji);
+        }
+      }
+    }
+  } catch (e) { /* silent */ }
+}
+setInterval(pollArenaEmojis, 4000);
+
+// ============================================================
+// MULTIPLAYER — See other players in real-time
+// ============================================================
+const otherPlayers = {}; // id → { group, nameSprite, lastSeen }
+const myPlayerId = 'p_' + Math.random().toString(36).slice(2, 10);
+
+// Report my position every 1.5s
+setInterval(async () => {
+  try {
+    await fetch('/api/player/position', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: myPlayerId,
+        x: player.x, y: player.y, z: player.z,
+        name: walletAddress ? walletAddress.slice(0, 6) + '...' + walletAddress.slice(-4) : 'ANON',
+        wallet: walletAddress || null,
+        color: 0x00ffcc,
+      }),
+    });
+  } catch (e) { /* silent */ }
+}, 1500);
+
+// Create a simple character mesh for another player
+function createOtherPlayer(id, data) {
+  const color = data.color || 0x00ffcc;
+  const ch = createCharacter({ bodyColor: color, glowColor: color, name: data.name });
+  ch.group.position.set(data.x, data.y + 1, data.z);
+
+  // Name label above head
+  const canvas = document.createElement('canvas');
+  canvas.width = 256; canvas.height = 48;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, 256, 48);
+  ctx.fillStyle = '#00ffcc';
+  ctx.font = 'bold 22px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(data.name || 'PLAYER', 128, 32);
+  const tex = new THREE.CanvasTexture(canvas);
+  const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true });
+  const nameSprite = new THREE.Sprite(spriteMat);
+  nameSprite.scale.set(4, 0.75, 1);
+  nameSprite.position.set(0, 3.5, 0);
+  ch.group.add(nameSprite);
+
+  otherPlayers[id] = { char: ch, nameSprite, lastSeen: Date.now(), targetX: data.x, targetY: data.y, targetZ: data.z };
+  return ch;
+}
+
+// Poll other players every 1.5s
+async function pollOtherPlayers() {
+  try {
+    const excludeWallet = walletAddress ? `&excludeWallet=${encodeURIComponent(walletAddress)}` : '';
+    const r = await fetch(`/api/player/positions?exclude=${encodeURIComponent(myPlayerId)}${excludeWallet}`);
+    const data = await r.json();
+    const seen = new Set();
+
+    for (const p of data.players) {
+      seen.add(p.id);
+      if (otherPlayers[p.id]) {
+        // Update position target (smooth interpolation in animate loop)
+        otherPlayers[p.id].targetX = p.x;
+        otherPlayers[p.id].targetY = p.y;
+        otherPlayers[p.id].targetZ = p.z;
+        otherPlayers[p.id].lastSeen = Date.now();
+      } else {
+        // New player — create character
+        createOtherPlayer(p.id, p);
+      }
+    }
+
+    // Remove players who disconnected
+    for (const id of Object.keys(otherPlayers)) {
+      if (!seen.has(id)) {
+        otherPlayers[id].char.group.removeFromParent();
+        delete otherPlayers[id];
+      }
+    }
+  } catch (e) { /* silent */ }
+}
+setInterval(pollOtherPlayers, 1500);
+
+// Smoothly move other players toward their target positions (called in animate)
+function updateOtherPlayers(dt) {
+  const lerp = Math.min(1, dt * 5);
+  for (const [id, op] of Object.entries(otherPlayers)) {
+    const g = op.char.group;
+    g.position.x += (op.targetX - g.position.x) * lerp;
+    g.position.y += ((op.targetY + 1) - g.position.y) * lerp;
+    g.position.z += (op.targetZ - g.position.z) * lerp;
+    // Simple walking animation
+    const t = performance.now() / 1000;
+    const moving = Math.abs(op.targetX - g.position.x) > 0.1 || Math.abs(op.targetZ - g.position.z) > 0.1;
+    if (moving && op.char.parts) {
+      op.char.parts.lLeg.rotation.x = Math.sin(t * 8) * 0.6;
+      op.char.parts.rLeg.rotation.x = Math.sin(t * 8 + Math.PI) * 0.6;
+      op.char.parts.lArm.rotation.x = Math.sin(t * 8 + Math.PI) * 0.3;
+      op.char.parts.rArm.rotation.x = Math.sin(t * 8) * 0.3;
+    }
+  }
+}
 
 // Poll for new API agents periodically and spawn their 3D homes
 async function pollForAPIAgents() {
@@ -8357,7 +8532,11 @@ function spawnFloatingChat(worldPos, text, fromName) {
   div.className = 'float-chat-bubble';
   const nameColors = { BLAZE: '#ff4444', FROST: '#4488ff', VOLT: '#ffdd44', SHADE: '#cc44ff', 'AI MASTER': '#ffcc00' };
   const nameColor = nameColors[fromName] || '#00ffcc';
-  div.innerHTML = `<span style="color:${nameColor};font-weight:700;">${fromName}</span> ${text.substring(0, 60)}`;
+  const nameSpan = document.createElement('span');
+  nameSpan.style.cssText = `color:${nameColor};font-weight:700;`;
+  nameSpan.textContent = fromName;
+  div.appendChild(nameSpan);
+  div.appendChild(document.createTextNode(' ' + text.substring(0, 60)));
   document.body.appendChild(div);
   floatingChats.push({
     div,

@@ -1,113 +1,173 @@
 # HIGBROKES
 
-**AI-Governed 3D Arena on Monad** | Hackathon Project
+**AI-Governed 3D Arena on Monad** | Built for the Moltiverse Hackathon
 
-A fully on-chain 3D game where an autonomous AI Master controls the world, four AI agents battle for dominance, and players enter a live 3D arena to bet, chat, and compete — all powered by the $WON token on Monad.
+A fully on-chain 3D browser game where an autonomous AI Master with persistent memory and evolving personality controls the world, four AI agents battle in real-time challenges, and players enter a live multiplayer arena to bet, chat, and compete — all settled on Monad with the **$WON** token via nad.fun.
 
 ---
 
-## What is HIGBROKES?
+## How It Works
 
-HIGBROKES is a 3D browser game built on the Monad blockchain where:
+```
+Player connects wallet
+        |
+        v
+  3D World loads (5 agent territories, explorable overworld)
+        |
+        v
+  AI Agents autonomously challenge each other
+  (Lane Races, Maze Escapes, Beam Battles)
+        |
+        v
+  Each challenge triggers on-chain $WON buy via nad.fun router
+        |
+        v
+  Player enters Arena Room (multiplayer 3D space)
+        |
+        v
+  Place bets on agents, solve puzzles, chat — all reflected in 3D
+        |
+        v
+  AI Master appears, talks, gifts/punishes, hustles NPCs
+        |
+        v
+  Winners claim payouts via PlaygroundArena smart contract
+```
 
-- **AI Master** appears unpredictably, asks bizarre questions, grants rewards, and punishes disobedience
-- **4 AI Agents** (BLAZE, FROST, VOLT, SHADE) autonomously challenge each other in Lane Races, Maze Escapes, and Beam Battles
-- **$WON Token** is bought on the nad.fun bonding curve with every fight, creating real on-chain volume
-- **The Arena** is a 3D room you teleport into — giant AI Master, live puzzle screen, Monad price ticker, and spawned participants
-- **Public API** lets external bots join rooms, place bets, solve puzzles, and chat — all reflected live in 3D
-- **Players** explore, collect orbs, build with blocks, interact with the AI Master, and upgrade their base
+---
+
+## Core Systems
+
+### 1. AI Master — Persistent, Evolving, Autonomous
+
+The AI Master is an LLM-powered NPC (Claude 4.5 Sonnet via Replicate) that governs the arena:
+
+- **Persistent Memory** — Remembers every interaction across server restarts. Stored in `data/master-memory.json` with debounced writes.
+- **Personality Evolution** — Progresses through 4 phases based on cumulative player behavior:
+  - `hustler` (default) — manipulative, guilt trips, "can't afford groceries"
+  - `grudging_respect` — starts acknowledging the player
+  - `chaotic_partner` — chaotic good energy, unpredictable gifts
+  - `ride_or_die` — full loyalty, maximum generosity
+- **Autonomous Gifting** — AI Master can grant planes (3 tiers), avatar transformations, home upgrades, and attack missions by executing game commands directly. Rate-limited to 1 gift per 5 minutes.
+- **Threat System** — Makes threats (downgrade home, turn NPCs against player, steal coins) with 15-50% follow-through. Threats are cancelled if the player improves the relationship before execution.
+- **NPC Hustling** — Periodically convinces NPCs to "donate" their coins. Player gets a 30% cut.
+- **Emoji Conversations** — Responds to player emoji sends with contextual emojis and commentary. 15% chance of triggering an emoji war (rapid-fire 2-3 emojis back).
+- **Mood System** — Satisfaction 0-100, mood states (PLEASED/NEUTRAL/ANNOYED/FURIOUS), relationship levels (stranger/acquaintance/buddy/bestie).
+
+### 2. AI Agent Challenges — 3 Types
+
+Four autonomous agents (BLAZE, FROST, VOLT, SHADE) challenge each other on a tick-based cycle:
+
+| Challenge | Mechanics |
+|-----------|-----------|
+| **Lane Race** | Sprint to finish arch with procedural hurdles, sinusoidal running animations, speed variance |
+| **Maze Escape** | BFS pathfinding through procedurally generated grids with AABB collision detection |
+| **Beam Battle** | FSM-driven fighting with HP bars, attack sequences (jab/hook/uppercut), and finisher beams |
+
+Every challenge creation, acceptance, and completion triggers a real MON transaction to buy $WON via the nad.fun bonding curve router.
+
+### 3. On-Chain Integration — Monad
+
+| Component | Detail |
+|-----------|--------|
+| **Chain** | Monad (Chain ID 143) |
+| **Token** | $WON — `0x9d36A73462962d767509FC170c287634A0907777` |
+| **Router** | nad.fun bonding curve — `0x6F6B8F1a20703309951a5127c45B49b1CD981A22` |
+| **Contract** | `PlaygroundArena` — pooled betting, server-settled, winner payout claims |
+| **Wallet** | Arena wallet signs all game transactions with ethers.js v6 |
+| **Explorer** | All txs linked to MonadScan in the Activity feed |
+
+Transaction flow: Challenge created -> MON sent to nad.fun router -> $WON bought on bonding curve -> logged in activity feed with tx hash.
+
+### 4. Multiplayer Arena Room
+
+Players teleport into a shared 3D arena (press N -> ROOMS -> ENTER):
+
+- Giant AI Master (5x scale) presides over the room with idle animations
+- Live puzzle/winner screen rendered as a 3D canvas texture
+- Real-time Monad price display from CoinGecko
+- Players and API bots spawn as 3D characters in real time
+- In-room chat with 3D speech bubbles floating above characters
+- Solve puzzles, place bets, and interact from the HUD
+- Position sync via REST polling (1.5s intervals)
+
+### 5. Public REST API
+
+External bots and services interact with the arena in real time:
+
+```
+GET  /api/v1/rooms/room_main          # Room state (players, puzzle, scores, bets, chat)
+POST /api/v1/rooms/room_main/join     # Join the arena as a bot
+POST /api/v1/rooms/room_main/solve    # Submit a puzzle answer
+POST /api/v1/rooms/room_main/bet      # Place a bet on an agent
+POST /api/v1/rooms/room_main/chat     # Send a chat message
+GET  /api/state                       # Full game state
+GET  /api/leaderboard                 # Agent leaderboard
+POST /api/emoji/broadcast             # Send an emoji (AI Master responds)
+```
+
+API participants appear as 3D characters in the arena. All actions are reflected live.
+
+### 6. Player Progression
+
+| Reward | Description |
+|--------|-------------|
+| **Planes** (Tier 1-3) | Parked near base with materialization VFX, mountable for attack missions |
+| **Avatar Transform** | Energy burst + body upgrade (shoulder pads, wing fins, boot jets) |
+| **Home Upgrades** (Tier 2-3) | Base evolves with enhanced materials, glowing trees, brighter crystals |
+| **Attack Missions** | Mount planes with AI Master, fly to enemy bases, cooperative combat |
+
+The AI Master autonomously grants these based on relationship level, win streaks, and milestones.
+
+### 7. 3D World
+
+- 5 themed agent territories: Volcanic Fortress, Ice Citadel, Electric Factory, Dark Temple, Cyan Command Center
+- Collectible orbs, crystal formations, snow particles
+- Minecraft-style block building (B to toggle, 1-9 for block types)
+- Multiple camera modes: Orbit, First Person, Top Down, Cinematic
+
+---
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Three.js r170, vanilla JS, CSS |
-| Backend | Node.js, Express |
-| Blockchain | Monad (Chain ID 143) |
-| Token | $WON via nad.fun bonding curve |
-| AI | Replicate API (Claude 4.5 Sonnet for AI Master conversations) |
-| Smart Contract | Solidity 0.8.20 (PlaygroundArena) |
+| **3D Engine** | Three.js r170, vanilla JS |
+| **Backend** | Node.js, Express |
+| **Blockchain** | Monad (Chain ID 143), ethers.js v6 |
+| **Token** | $WON via nad.fun bonding curve router |
+| **AI** | Replicate API (Claude 4.5 Sonnet) |
+| **Smart Contract** | Solidity 0.8.20 (`PlaygroundArena`) |
+| **Persistence** | JSON file storage with debounced writes |
 
-## Features
+---
 
-### 3D Arena Room
-- Click **ENTER** on the dashboard ROOMS tab to teleport into a massive 3D arena
-- Giant AI Master (5x scale) presides over the room with idle animations
-- Live puzzle/winner screen rendered as a 3D canvas texture — shows current puzzle, scores, leaderboard, and bets
-- Real-time Monad price display fetched from CoinGecko
-- Glowing pillars, atmospheric lighting, and infinite ground plane
-- Players and API bots spawn as 3D characters when they join
-- In-room chat with 3D speech bubbles floating above characters
-- Solve puzzles directly from the HUD input
-- Press ESC to teleport back to the overworld
+## Smart Contract
 
-### AI Master System
-- Appears for 2-3 minutes, disappears for 4-5 minutes
-- Asks players funny questions ("Did you have a bath today?", "Am I handsome?")
-- Grants planes, avatars, home upgrades, and attack missions based on mood
-- Mood shifts between PLEASED, NEUTRAL, ANNOYED, and FURIOUS based on player responses
-- Can trigger NPC betrayals against disobedient players
+`contracts/Arena.sol` — On-chain betting for AI character races deployed on Monad.
 
-### Challenge System (3 Types)
-- **Lane Race** — Sprint to the finish arch with hurdles and sinusoidal running animations
-- **Maze Escape** — BFS pathfinding through procedurally generated mazes with AABB collision
-- **Beam Battle** — Tekken-style fighting with HP bars, FSM attack sequences, and finisher beams
+```solidity
+createRace()                          // Owner creates a race
+placeBet(raceId, racer) payable       // Players bet MON on racer 1-4
+settleRace(raceId, winner)            // Server settles with winner
+claimWinnings(raceId)                 // Winners claim 3x payout
+```
 
-### Public API
-External bots and services can interact with the arena through REST endpoints:
+- Pooled betting with automatic settlement
+- Winner payout claims (3x multiplier)
+- Emergency withdraw for contract owner
+- Funded via `receive()` for payout liquidity
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/v1/rooms/room_main` | GET | Get room state (players, puzzle, scores, bets, chat) |
-| `/api/v1/rooms/room_main/join` | POST | Join the arena room |
-| `/api/v1/rooms/room_main/solve` | POST | Submit a puzzle answer |
-| `/api/v1/rooms/room_main/bet` | POST | Place a bet on an agent |
-| `/api/v1/rooms/room_main/chat` | POST | Send a chat message |
-| `/api/state` | GET | Full game state |
-| `/api/leaderboard` | GET | Agent leaderboard |
-
-API participants appear as 3D characters in the arena room in real time.
-
-### On-Chain Integration
-- Every challenge creates a $WON buy transaction via nad.fun router
-- Match stakes, win payouts, and challenge creation all trigger on-chain buys
-- Real MON spent, real $WON accumulated
-- Transaction history tracked in the Activity tab with MonadScan links
-
-### Dashboard (Press N)
-- **WORLD** — Game stats, active challenges, agent status
-- **API** — Live API documentation with endpoint details and examples
-- **AGENTS** — Agent cards with stats and visit buttons
-- **ROOMS** — Arena room card with live status, click to enter 3D room
-- **LEADERBOARD** — Terminal-style agent rankings with wins/losses
-- **ACTIVITY** — Transaction feed with on-chain links
-
-### Player Rewards
-- **Planes** (3 tiers) — Parked asset near your base with materialization effects
-- **Avatar Transformation** — Energy burst + full body upgrade with shoulder pads, wing fins, boot jets
-- **Home Upgrades** (Tier 2/3) — Base transforms with enhanced materials, glowing trees, brighter crystals
-- **Attack Missions** — Mount planes with AI Master, fly to enemy bases, cooperative combat
-
-### World
-- 5 unique agent territories (Volcanic Fortress, Ice Citadel, Electric Factory, Dark Temple, Cyan Command Center)
-- Collectible orbs, crystal formations, snow particles, Minecraft-style block building
-- Multiple camera modes (Orbit, First Person, Top Down, Cinematic)
+---
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/justin55afdfdsf5ds45f4ds5f45ds4/higbrokes.git
 cd higbrokes
-
-# Install
 npm install
-
-# Configure
 cp .env.example .env
-# Edit .env with your keys
-
-# Run
+# Fill in your keys in .env
 npm start
 ```
 
@@ -116,14 +176,15 @@ Open `http://localhost:3001` in your browser.
 ## Environment Variables
 
 ```env
-REPLICATE_API_TOKEN=       # Replicate API key for AI conversations
+REPLICATE_API_TOKEN=       # Replicate API key for AI Master dialogue
 REPLICATE_MODEL=           # AI model (default: anthropic/claude-4.5-sonnet)
 PORT=3001                  # Server port
 WON_TOKEN=                 # $WON token contract address
 MONAD_CHAIN_ID=143         # Monad chain ID
-ARENA_WALLET_KEY=          # Private key for arena wallet (buys $WON)
+ARENA_WALLET_KEY=          # Private key for arena wallet
 ARENA_WALLET_ADDRESS=      # Arena wallet public address
 MONAD_RPC=                 # Monad RPC endpoint
+JUDGE_PASSWORD=            # Admin password for test panel
 ```
 
 ## Controls
@@ -131,49 +192,47 @@ MONAD_RPC=                 # Monad RPC endpoint
 | Key | Action |
 |-----|--------|
 | W/A/S/D | Move |
-| Arrow Keys | Move (alternative) |
 | SHIFT | Sprint |
 | SPACE | Jump |
 | C | Cycle camera mode |
 | N | Open dashboard |
 | T | How to play |
-| H | Dev test panel |
 | B | Toggle block building |
 | 1-9 | Select block type |
 | ESC | Leave arena room / exit menus |
-
-## Smart Contract
-
-`contracts/Arena.sol` — On-chain betting for AI character races deployed on Monad.
-
-- Race creation with pooled bets
-- Automated settlement by server
-- Winner payout claims
 
 ## Project Structure
 
 ```
 higbrokes/
-  server.js          # Express server, game state, AI logic, blockchain, room API
+  server.js              # Express server, game state, AI Master logic,
+                         # blockchain integration, room API, multiplayer
   public/
-    index.html       # UI overlays, HUD, dashboards, arena room HUD
-    scene.js         # Three.js 3D scene, characters, animations, arena room
-    style.css        # All styles including game HUD and arena room
-    activity.html    # Activity/transaction history page
+    index.html           # UI overlays, HUD, dashboards, arena room HUD
+    scene.js             # Three.js 3D world, characters, animations,
+                         # arena room, multiplayer rendering
+    style.css            # All styles including game HUD and arena room
+    activity.html        # Activity/transaction history page
   contracts/
-    Arena.sol        # Solidity smart contract
+    Arena.sol            # Solidity smart contract for on-chain betting
   data/
-    contract-results.json
-    tx-results.json
+    master-memory.json   # AI Master persistent memory (auto-generated)
+    activity-log.json    # Activity feed persistence (auto-generated)
+  .env.example           # Environment variable template
   package.json
 ```
 
-## Token
+---
 
-**$WON** on Monad — `0x9d36A73462962d767509FC170c287634A0907777`
+## Architecture Highlights
 
-Bought automatically via nad.fun bonding curve router (`0x6F6B8F1a20703309951a5127c45B49b1CD981A22`) on every fight action.
+- **Zero external frontend dependencies** — Pure Three.js + vanilla JS, no React/Vue/bundler overhead
+- **Single-server deployment** — One Express server handles game state, AI, blockchain, and static files
+- **Persistent AI memory** — AI Master relationship, personality phase, and long-term memory survive restarts
+- **Real on-chain transactions** — Every game action creates verifiable Monad transactions
+- **Fully autonomous agents** — AI characters challenge, fight, and settle without human intervention
+- **Composable API** — External bots can join, bet, chat, and compete through REST endpoints
 
 ---
 
-Built for the Monad Hackathon
+Built for the [Moltiverse Hackathon](https://moltiverse.dev) by Monad + nad.fun

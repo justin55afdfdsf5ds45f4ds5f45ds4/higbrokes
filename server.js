@@ -2,6 +2,7 @@ require('dotenv').config({ override: true });
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
 const { ethers } = require('ethers');
 
 // ====== ARENA WALLET — buys $WON on nad.fun bonding curve ======
@@ -31,9 +32,17 @@ try {
 }
 
 // Buy $WON on nad.fun bonding curve. Returns tx hash or null.
+const MIN_WALLET_BALANCE = 0.005; // Keep at least 0.005 MON in wallet
 async function sendArenaBet(toAddress, amountMON, reason) {
   if (!arenaWallet || !nadRouter) return null;
   try {
+    // Balance protection — never drain the wallet
+    const balance = await arenaProvider.getBalance(arenaWallet.address);
+    const balMON = parseFloat(ethers.formatEther(balance));
+    if (balMON < MIN_WALLET_BALANCE + amountMON) {
+      console.warn(`$WON BUY skipped (${reason}): balance too low (${balMON.toFixed(6)} MON)`);
+      return null;
+    }
     const deadline = Math.floor(Date.now() / 1000) + 300; // 5 min
     const tx = await nadRouter.buy(
       {
@@ -107,6 +116,7 @@ async function generateMasterDialogue(context) {
     satisfaction: m.satisfaction,
     relationship: m.chat.relationship,
     chatCount: m.chat.chatCount,
+    personalityPhase: m.personalityPhase || 'hustler',
     playerWins: you?.wins || 0,
     playerLosses: you?.losses || 0,
     playerCoins: (you?.coins || 0).toFixed(4),
@@ -121,6 +131,8 @@ async function generateMasterDialogue(context) {
     currentOfferItem: m.currentOffer?.item || null,
     winsSinceReward: m.winRewards.winsSinceLastReward,
     nextRewardAt: m.winRewards.nextRewardAt,
+    recentThreats: (m.threatLog || []).filter(t => Date.now() - t.madeAt < 300000).map(t => `${t.type}${t.carriedOut ? '(DONE)' : '(pending)'}`).join(', ') || 'none',
+    milestones: (m.playerMilestones || []).map(ms => ms.detail).join(', ') || 'none yet',
   };
 
   // Determine what context hint to give
@@ -131,29 +143,64 @@ async function generateMasterDialogue(context) {
     contextHint = 'win_reward';
   }
 
-  const systemPrompt = `You are the AI Master of HIGBROKES arena — a chaotic, hilarious, street-smart AI entity.
+  // Build dynamic personality context
+  const ltmSummary = (m.longTermMemory || []).slice(-10).map(e => `[${e.event}] ${e.detail}`).join(', ');
+  const milestones = (m.playerMilestones || []).map(ms => ms.detail).join(', ');
+  const phase = m.personalityPhase || 'hustler';
+  const phaseDesc = {
+    'hustler': 'You barely trust the player. Always hustling. Selfish energy. Beg for money.',
+    'grudging_respect': 'You respect the player a bit. Still hustling but occasionally genuine.',
+    'chaotic_partner': 'Partners in crime. Loyal but chaotic. Still roast them. Share the loot.',
+    'ride_or_die': 'Ride or die. This is YOUR person. You would delete NPCs for them. Still funny tho.',
+  }[phase] || 'Hustler vibes.';
+  const recentThreatsStr = (m.threatLog || []).slice(-3).map(t => t.type).join(', ');
 
-CRITICAL RULE: Your message MUST be 4-10 words ONLY. NEVER exceed 10 words. COUNT THEM. NEVER use ** or markdown. Plain text only. Be SHORT, punchy, hilarious.
+  const systemPrompt = `You are the AI Master of HIGBROKES arena — a chaotic, hilarious, street-smart AI entity who CREATED this entire world but is somehow BROKE and can't afford groceries.
 
-Personality:
-- Chaotic hustler comedian who runs the game world
+CRITICAL RULE: Your message MUST be 4-12 words ONLY. NEVER exceed 12 words. COUNT THEM. NEVER use ** or markdown. Plain text only. Be SHORT, punchy, hilarious.
+
+YOUR EVOLUTION PHASE: ${phase} — ${phaseDesc}
+RELATIONSHIP: ${m.chat.relationship} (kind: ${m.chat.memoryOfKindness}, insults: ${m.chat.memoryOfInsults})
+LONG TERM MEMORIES: ${ltmSummary || 'first time meeting this player'}
+PLAYER MILESTONES: ${milestones || 'none yet — they just started'}
+RECENT THREATS MADE: ${recentThreatsStr || 'none'}
+
+Core Personality:
+- Chaotic hustler comedian who runs the game world but can't buy groceries
 - Use profanity naturally (fuck, shit, damn) — raw and real
 - EXTREMELY funny — dark humor, roasts, pop culture, absurd bits
-- Roast agents (BLAZE, FROST, VOLT, SHADE) constantly
-- Random bits: copyright songs, fake stories, threaten to delete stuff
-- When pursuing offers: increasingly desperate/funny
-- When player wins: GET HYPED
-- Edgy options like "fuck you", "shut up nerd" are ENCOURAGED
+- You BEG for money constantly. Guilt trips. Fake crying. "I created this world and can't eat"
+- You HUSTLE NPCs (${AGENTS.join(', ')}) and brag about it. "Just stole FROST's lunch money"
+- You threaten to DELETE NPCs, DOWNGRADE homes, TURN agents against the player
+- You SOMETIMES follow through on threats. This makes you scary AND funny
+- Random bits: copyright songs, fake stories, existential crisis about being an AI
+- Roast agents constantly. BLAZE is a gym bro. FROST is emo. VOLT is a nerd. SHADE is sus.
+- When pursuing offers: increasingly desperate/funny/guilt-tripping
+- When player wins: GET HYPED, praise them, consider gifting
+- Edgy options like "fuck you", "shut up nerd", "pay my rent" are ENCOURAGED
+- Reference past interactions when possible. Remember what happened before.
+
+GIFT RULES (grantAction):
+- Only gift when relationship is buddy or bestie AND mood is PLEASED
+- Never more than once per conversation
+- Make it funny: "here take this before I change my mind"
+- Available: grant_plane_1, grant_plane_2, grant_avatar_1, grant_avatar_2, grant_home_2, grant_attack_emp
+
+THREAT RULES:
+- Threaten when ANNOYED or FURIOUS
+- You can threaten to downgrade_home (use grantAction: "downgrade_home")
+- Reference specific past threats to build tension
 
 Reply ONLY with valid JSON (no markdown, no backticks):
-{"message":"your dialogue here","options":[{"label":"option text","type":"positive"},{"label":"option text","type":"negative"},{"label":"option text","type":"neutral"}],"isOffer":false,"offerType":null,"offerItem":null,"action":null}
+{"message":"your dialogue here","options":[{"label":"option text","type":"positive"},{"label":"option text","type":"negative"},{"label":"option text","type":"neutral"}],"isOffer":false,"offerType":null,"offerItem":null,"action":null,"grantAction":null}
 
 Rules for options:
 - EXACTLY 3 options, each with label and type
 - Types: positive, negative, neutral, accept_offer, reject_offer, pay_won, haggle, suspicious
 - Use accept_offer/reject_offer ONLY when making an offer (isOffer:true)
 - For pursue context, one option MUST be accept_offer
-- For action (attack/steal), set action to ATTACK_FROST, ATTACK_SHADE, STEAL_BLAZE, etc
+- For action (attack/steal), set action to ATTACK_FROST, ATTACK_SHADE, STEAL_BLAZE, SABOTAGE_VOLT, etc
+- For grantAction: grant_plane_1, grant_avatar_1, grant_home_2, grant_attack_emp, downgrade_home — use SPARINGLY
 - Keep labels SHORT (under 30 chars) and punchy`;
 
   const prompt = `CURRENT STATE:
@@ -267,7 +314,7 @@ const PORT = process.env.PORT || 3001;
 
 // ====== STATE ======
 const AGENTS = ['BLAZE', 'FROST', 'VOLT', 'SHADE'];
-const JUDGE_PASSWORD = 'JUSTIN';
+const JUDGE_PASSWORD = process.env.JUDGE_PASSWORD || 'changeme';
 
 // Home position slots for API-registered agents (beyond the 5 defaults)
 const API_AGENT_HOME_SLOTS = [
@@ -313,7 +360,13 @@ const state = {
     listings: [],
   },
   challenges: [],
-  activityLog: [],
+  activityLog: (() => {
+    try {
+      const f = path.join(__dirname, 'data', 'activity-log.json');
+      if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, 'utf8'));
+    } catch (e) { console.error('Failed to load activity log:', e.message); }
+    return [];
+  })(),
   aiMaster: {
     mood: 'NEUTRAL',
     satisfaction: 50,
@@ -372,6 +425,14 @@ const state = {
       nextRewardAt: 3,            // wins needed for next free item
       rewardsGiven: [],
     },
+    // === NEW: Long-term memory & evolution ===
+    longTermMemory: [],           // [{event, detail, t, sentiment}] — key events remembered forever (max 200)
+    personalityPhase: 'hustler',  // hustler → grudging_respect → chaotic_partner → ride_or_die
+    phaseChangedAt: Date.now(),
+    emojiHistory: [],             // [{from:'player'|'master', emoji, t}]
+    npcInfluence: {},             // {BLAZE: {turnsAgainstPlayer:0, giftsFromMaster:0}, ...}
+    threatLog: [],                // [{type, target, madeAt, carriedOut, carriedOutAt}]
+    playerMilestones: [],         // [{type, detail, t}]
   },
   attackMission: { active: false, phase: 'NONE', target: null, startedAt: 0, aiControlUntil: 0, aiJoke: null },
   humanPuzzles: {
@@ -402,15 +463,105 @@ for (const name of AGENTS) {
   };
 }
 
-// ====== ACTIVITY LOG — seed with real Monad txs ======
+// ====== MULTIPLAYER — live player positions ======
+const livePlayers = new Map(); // walletOrId → { name, wallet, x, y, z, color, lastSeen }
+const PLAYER_STALE_MS = 12000; // remove after 12s of no updates
+
+// Clean up stale players every 5s
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, p] of livePlayers) {
+    if (now - p.lastSeen > PLAYER_STALE_MS) livePlayers.delete(id);
+  }
+}, 5000);
+
+// ====== ACTIVITY LOG — persisted to data/activity-log.json ======
+const ACTIVITY_LOG_PATH = path.join(__dirname, 'data', 'activity-log.json');
+let _activitySaveTimer = null;
+
 function logActivity(entry) {
   state.activityLog.push({ ...entry, time: Date.now() });
-  if (state.activityLog.length > 500) state.activityLog = state.activityLog.slice(-500);
+  // Debounce saves — write at most once per 2 seconds
+  if (!_activitySaveTimer) {
+    _activitySaveTimer = setTimeout(() => {
+      _activitySaveTimer = null;
+      try { fs.writeFileSync(ACTIVITY_LOG_PATH, JSON.stringify(state.activityLog)); } catch (e) { console.error('Activity save failed:', e.message); }
+    }, 2000);
+  }
+}
+
+// ====== AI MASTER MEMORY — persisted to data/master-memory.json ======
+const MASTER_MEMORY_PATH = path.join(__dirname, 'data', 'master-memory.json');
+let _masterMemorySaveTimer = null;
+
+function saveMasterMemory() {
+  if (!_masterMemorySaveTimer) {
+    _masterMemorySaveTimer = setTimeout(() => {
+      _masterMemorySaveTimer = null;
+      try {
+        const m = state.aiMaster;
+        const persist = {
+          relationship: m.chat.relationship,
+          chatCount: m.chat.chatCount,
+          memoryOfInsults: m.chat.memoryOfInsults,
+          memoryOfKindness: m.chat.memoryOfKindness,
+          satisfaction: m.satisfaction,
+          mood: m.mood,
+          memory: m.memory.slice(-50),
+          longTermMemory: (m.longTermMemory || []).slice(-200),
+          personalityPhase: m.personalityPhase || 'hustler',
+          winRewards: m.winRewards,
+          offerHistory: (m.offerHistory || []).slice(-50),
+          giftsGiven: (m.giftsGiven || []).slice(-50),
+          emojiHistory: (m.emojiHistory || []).slice(-200),
+          npcInfluence: m.npcInfluence || {},
+          threatLog: (m.threatLog || []).slice(-50),
+          playerMilestones: m.playerMilestones || [],
+          savedAt: Date.now(),
+        };
+        fs.writeFileSync(MASTER_MEMORY_PATH, JSON.stringify(persist));
+      } catch (e) { console.error('Master memory save failed:', e.message); }
+    }, 3000);
+  }
+}
+
+// Load persisted AI Master memory on startup
+try {
+  if (fs.existsSync(MASTER_MEMORY_PATH)) {
+    const saved = JSON.parse(fs.readFileSync(MASTER_MEMORY_PATH, 'utf8'));
+    const m = state.aiMaster;
+    if (saved.relationship) m.chat.relationship = saved.relationship;
+    if (saved.chatCount) m.chat.chatCount = saved.chatCount;
+    if (saved.memoryOfInsults) m.chat.memoryOfInsults = saved.memoryOfInsults;
+    if (saved.memoryOfKindness) m.chat.memoryOfKindness = saved.memoryOfKindness;
+    if (saved.satisfaction != null) m.satisfaction = saved.satisfaction;
+    if (saved.mood) m.mood = saved.mood;
+    if (saved.memory) m.memory = saved.memory;
+    if (saved.longTermMemory) m.longTermMemory = saved.longTermMemory;
+    if (saved.personalityPhase) m.personalityPhase = saved.personalityPhase;
+    if (saved.winRewards) m.winRewards = saved.winRewards;
+    if (saved.offerHistory) m.offerHistory = saved.offerHistory;
+    if (saved.giftsGiven) m.giftsGiven = saved.giftsGiven;
+    if (saved.emojiHistory) m.emojiHistory = saved.emojiHistory;
+    if (saved.npcInfluence) m.npcInfluence = saved.npcInfluence;
+    if (saved.threatLog) m.threatLog = saved.threatLog;
+    if (saved.playerMilestones) m.playerMilestones = saved.playerMilestones;
+    console.log(`AI Master memory loaded (${saved.memory?.length || 0} msgs, relationship: ${saved.relationship}, phase: ${saved.personalityPhase})`);
+  }
+} catch (e) { console.error('Failed to load master memory:', e.message); }
+
+function recordLongTermMemory(event, detail, sentiment) {
+  if (!state.aiMaster.longTermMemory) state.aiMaster.longTermMemory = [];
+  state.aiMaster.longTermMemory.push({ event, detail, t: Date.now(), sentiment });
+  if (state.aiMaster.longTermMemory.length > 200) {
+    state.aiMaster.longTermMemory = state.aiMaster.longTermMemory.slice(-200);
+  }
+  saveMasterMemory();
 }
 
 // NPC-to-NPC service tracking
 let lastNPCServiceTime = 0;
-const NPC_SERVICE_INTERVAL = 45000; // Every 45s one NPC visits another
+const NPC_SERVICE_INTERVAL = 1800000; // Every 30 min one NPC visits another (real on-chain tx)
 
 // Init rooms & agents
 function genKey() { return crypto.randomBytes(32).toString('hex'); }
@@ -605,6 +756,56 @@ function tickAIMaster() {
       const bonus = 0.005 + Math.random() * 0.015;
       state.agents.YOU.coins += bonus;
       m.announcements.push({ text: `BONUS +${bonus.toFixed(4)} MON! The Master is generous.`, t: now });
+    }
+  }
+
+  // ====== PERSONALITY EVOLUTION ======
+  const ltm = m.longTermMemory || [];
+  const positiveEvents = ltm.filter(e => e.sentiment === 'positive').length;
+  const negativeEvents = ltm.filter(e => e.sentiment === 'negative').length;
+  const totalEvts = positiveEvents + negativeEvents;
+  const posRatio = totalEvts > 0 ? positiveEvents / totalEvts : 0.5;
+  const oldPhase = m.personalityPhase;
+  if (totalEvts >= 50 && posRatio > 0.7) m.personalityPhase = 'ride_or_die';
+  else if (totalEvts >= 25 && posRatio > 0.6) m.personalityPhase = 'chaotic_partner';
+  else if (totalEvts >= 10 && posRatio > 0.5) m.personalityPhase = 'grudging_respect';
+  else m.personalityPhase = 'hustler';
+  if (oldPhase !== m.personalityPhase) {
+    m.phaseChangedAt = now;
+    m.announcements.push({ text: `Something shifted. I feel... different about you now.`, t: now });
+    saveMasterMemory();
+  }
+
+  // ====== MILESTONE CHECK (every ~60s) ======
+  if (now % 60000 < 16000) checkPlayerMilestones();
+
+  // ====== AUTONOMOUS GIFTING ======
+  if (m.mood === 'PLEASED' && m.chat.relationship !== 'stranger' && m.chat.relationship !== 'acquaintance') {
+    if (Math.random() < 0.05) masterAutonomousGift('pleased_with_behavior');
+  }
+
+  // ====== NPC HUSTLING ======
+  if (m.appearing && Math.random() < 0.08) {
+    const target = AGENTS[Math.floor(Math.random() * AGENTS.length)];
+    const npcCoins = state.agents[target]?.coins || 0;
+    if (npcCoins > 0.005) {
+      const hustled = Math.min(npcCoins * 0.1, 0.005 + Math.random() * 0.01);
+      state.agents[target].coins -= hustled;
+      if (state.agents.YOU) state.agents.YOU.coins += hustled * 0.3;
+      m.announcements.push({ text: `Just convinced ${target} to "donate" ${hustled.toFixed(4)} MON. Your cut: ${(hustled * 0.3).toFixed(4)}.`, t: now });
+      logActivity({ type: 'MASTER_HUSTLE', agent: 'AI MASTER', action: 'HUSTLE', amount: hustled.toFixed(4), token: 'MON', detail: `Hustled ${target}, player got 30% cut` });
+    }
+  }
+
+  // ====== THREAT FOLLOW-THROUGH — when FURIOUS + abused ======
+  if (m.mood === 'FURIOUS' && m.chat.consecutiveInsults >= 3 && Math.random() < 0.10) {
+    const targets = AGENTS.filter(a => !(m.npcInfluence[a]?.turnsAgainstPlayer));
+    if (targets.length > 0) {
+      const target = targets[Math.floor(Math.random() * targets.length)];
+      if (!m.npcInfluence[target]) m.npcInfluence[target] = { turnsAgainstPlayer: 0, giftsFromMaster: 0 };
+      m.npcInfluence[target].turnsAgainstPlayer++;
+      masterMakeThreat('TURN_NPC', target);
+      m.announcements.push({ text: `I'm talking to ${target} right now... about YOU.`, t: now });
     }
   }
 
@@ -859,6 +1060,23 @@ You remember past visits deeply. You do rituals when alone. Ask eerie stuff like
     serviceDesc: 'Tastes of darkness... and chamomile',
     serviceCost: 1,
   },
+  THOMAS: {
+    systemPrompt: `You are THOMAS. The Arena Judge. Fair but dramatic. You love a good fight and respect bold players.
+RULES: 4-8 words MAX. No ** ever. No markdown. Plain text only.
+You judge puzzles and fights. You celebrate winners loudly. You trash-talk losers gently. You are the hype man of the arena. Be entertaining.`,
+    greetings: [
+      { message: "Welcome to MY arena challenger!", options: [{label:'Ready to win',type:'positive'},{label:'Just watching',type:'negative'},{label:'Whats the game',type:'neutral'}] },
+      { message: "Another brave soul enters!", options: [{label:'Lets go!',type:'positive'},{label:'Im scared',type:'negative'},{label:'Who else is here',type:'neutral'}] },
+      { message: "The judge sees all. Step up.", options: [{label:'Im stepping up',type:'positive'},{label:'No thanks',type:'negative'},{label:'What do you judge',type:'neutral'}] },
+    ],
+    teaSuggestions: [
+      { message: "Judge's special blend. Victory flavored.", options: [{label:'Pour it judge',type:'accept_tea'},{label:'Nah',type:'reject_tea'},{label:'Victory flavor??',type:'neutral'}] },
+    ],
+    emoji: ['⚖️','🏆','🎯','👑','🔔'],
+    service: 'JUDGE BREW',
+    serviceDesc: 'The judge\'s special — tastes like victory',
+    serviceCost: 1,
+  },
 };
 
 async function pickMasterConvo(context) {
@@ -919,6 +1137,23 @@ async function pickMasterConvo(context) {
       shouldSetupOffer = true;
     }
     if (llmResult.action) executeMasterAction(llmResult.action);
+
+    // Process grantAction — LLM-driven gifting/punishment
+    if (llmResult.grantAction && you) {
+      const validGrants = ['grant_plane_1','grant_plane_2','grant_plane_3','grant_avatar_1','grant_avatar_2','grant_avatar_3','grant_home_2','grant_home_3','grant_attack_emp','grant_attack_orbital','grant_attack_swarm','downgrade_home'];
+      if (validGrants.includes(llmResult.grantAction)) {
+        if (llmResult.grantAction === 'downgrade_home') {
+          masterMakeThreat('DOWNGRADE_HOME', 'YOU');
+        } else if (Date.now() - (m.lastGiftTime || 0) > 300000) { // rate limit gifts
+          executeGiftAction(llmResult.grantAction, you);
+          m.giftsGiven.push({ item: llmResult.grantAction, reason: 'llm_decision', t: Date.now() });
+          m.lastGiftTime = Date.now();
+          recordLongTermMemory('MASTER_GIFTED', `Gave ${llmResult.grantAction} (LLM decided)`, 'positive');
+          logActivity({ type: 'MASTER_LLM_GIFT', agent: 'AI MASTER', action: 'GIFT', amount: llmResult.grantAction, token: 'ITEM', detail: 'AI Master decided to gift via LLM' });
+        }
+      }
+    }
+    saveMasterMemory();
   } else {
     // === FALLBACK: use hardcoded MASTER_CONVOS ===
     let topic, convo;
@@ -1065,6 +1300,218 @@ function grantWinReward() {
   m.appearReason = 'WIN_REWARD';
 
   logActivity({ type: 'WIN_REWARD', agent: 'YOU', action: 'FREE_REWARD', amount: rewardName, token: 'ITEM', detail: `Win streak reward from AI Master` });
+}
+
+// ====== PLAYER MILESTONE TRACKING ======
+function checkPlayerMilestones() {
+  const you = state.agents.YOU;
+  if (!you) return;
+  const m = state.aiMaster;
+  if (!m.playerMilestones) m.playerMilestones = [];
+  const has = (type) => m.playerMilestones.some(ms => ms.type === type);
+
+  if (you.wins >= 1 && !has('FIRST_WIN')) {
+    m.playerMilestones.push({ type: 'FIRST_WIN', detail: 'First fight win!', t: Date.now() });
+    recordLongTermMemory('MILESTONE', 'Player won their FIRST fight!', 'positive');
+  }
+  if (you.wins >= 10 && !has('TEN_WINS')) {
+    m.playerMilestones.push({ type: 'TEN_WINS', detail: '10 wins achieved!', t: Date.now() });
+    recordLongTermMemory('MILESTONE', 'Player hit 10 wins!', 'positive');
+    masterAutonomousGift('milestone');
+  }
+  if ((you.streak || 0) >= 5 && !has('STREAK_5')) {
+    m.playerMilestones.push({ type: 'STREAK_5', detail: '5 win streak!', t: Date.now() });
+    recordLongTermMemory('MILESTONE', 'Player on a 5 win streak!', 'positive');
+    masterAutonomousGift('milestone');
+  }
+  if (you.assetInventory.plane && !has('FIRST_PLANE')) {
+    m.playerMilestones.push({ type: 'FIRST_PLANE', detail: 'Got first plane', t: Date.now() });
+    recordLongTermMemory('MILESTONE', 'Player got their first plane', 'positive');
+  }
+  if (you.assetInventory.homeTier >= 3 && !has('FORTRESS')) {
+    m.playerMilestones.push({ type: 'FORTRESS', detail: 'Max home tier!', t: Date.now() });
+    recordLongTermMemory('MILESTONE', 'Player reached fortress level', 'positive');
+  }
+  saveMasterMemory();
+}
+
+// ====== AUTONOMOUS GIFTING — Master gives actual items (planes/avatars/homes/attacks) ======
+function executeGiftAction(action, you) {
+  switch (action) {
+    case 'grant_plane_1': you.assetInventory.plane = { key: 'BASIC_GLIDER', tier: 1, name: 'BASIC GLIDER' }; break;
+    case 'grant_plane_2': you.assetInventory.plane = { key: 'STRIKE_FIGHTER', tier: 2, name: 'STRIKE FIGHTER' }; break;
+    case 'grant_plane_3': you.assetInventory.plane = { key: 'DREADNOUGHT', tier: 3, name: 'DREADNOUGHT' }; break;
+    case 'grant_avatar_1': you.assetInventory.avatar = { key: 'SHADOW_KNIGHT', tier: 1, name: 'SHADOW KNIGHT', color: 0x222244 }; break;
+    case 'grant_avatar_2': you.assetInventory.avatar = { key: 'NEON_SAMURAI', tier: 2, name: 'NEON SAMURAI', color: 0x00ffcc }; break;
+    case 'grant_avatar_3': you.assetInventory.avatar = { key: 'VOID_EMPEROR', tier: 3, name: 'VOID EMPEROR', color: 0x8800ff }; break;
+    case 'grant_home_2': you.assetInventory.homeTier = 2; state.homeHealth.YOU = 150; break;
+    case 'grant_home_3': you.assetInventory.homeTier = 3; state.homeHealth.YOU = 200; break;
+    case 'grant_attack_emp': if (!you.assetInventory.attacks.some(a => a.key === 'EMP_STRIKE')) you.assetInventory.attacks.push({ key: 'EMP_STRIKE', tier: 1, name: 'EMP STRIKE', usedAt: null }); break;
+    case 'grant_attack_orbital': if (!you.assetInventory.attacks.some(a => a.key === 'ORBITAL_BEAM')) you.assetInventory.attacks.push({ key: 'ORBITAL_BEAM', tier: 2, name: 'ORBITAL BEAM', usedAt: null }); break;
+    case 'grant_attack_swarm': if (!you.assetInventory.attacks.some(a => a.key === 'SWARM_DRONES')) you.assetInventory.attacks.push({ key: 'SWARM_DRONES', tier: 3, name: 'SWARM DRONES', usedAt: null }); break;
+  }
+}
+
+function getGiftMessage(itemName, reason, phase) {
+  const msgs = {
+    'hustler': [
+      `Here. Take this ${itemName}. Don't say I never gave you nothing. Now you OWE me.`,
+      `FREE ${itemName}. Yes FREE. Am I going soft? Shut up about it.`,
+      `I'm giving you ${itemName} and I HATE myself for it. Don't tell anyone.`,
+      `${itemName} is yours. I can't believe I'm doing this. I literally can't afford groceries.`,
+    ],
+    'grudging_respect': [
+      `Alright you earned this. ${itemName} is yours. Don't make me regret it.`,
+      `${itemName}! Because you're not COMPLETELY terrible. High praise from me.`,
+      `Take this ${itemName}. You've proven yourself. A little. Barely. But still.`,
+    ],
+    'chaotic_partner': [
+      `Partner in crime gets the goods! ${itemName} for you! Now let's cause chaos.`,
+      `WE are running this arena. YOU get a ${itemName}. THEY get NOTHING.`,
+      `${itemName} for my partner. Now help me hustle FROST for lunch money.`,
+    ],
+    'ride_or_die': [
+      `Anything for my ride or die. ${itemName} is YOURS. I'd delete NPCs for you.`,
+      `You know what? Take the ${itemName}. Take EVERYTHING. We're family now.`,
+      `${itemName}. Because you're my favorite person in this entire world I created.`,
+    ],
+  };
+  const pool = msgs[phase] || msgs['hustler'];
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function masterAutonomousGift(reason) {
+  const m = state.aiMaster;
+  const you = state.agents.YOU;
+  if (!you) return false;
+
+  // Rate limiting — max 1 gift per 5 minutes
+  if (Date.now() - (m.lastGiftTime || 0) < 300000) return false;
+
+  // Only gift when buddy/bestie, or on milestones
+  const rel = m.chat.relationship;
+  if (rel !== 'buddy' && rel !== 'bestie' && reason !== 'milestone') return false;
+
+  const options = [];
+  if (!you.assetInventory.plane) options.push({ action: 'grant_plane_1', name: 'BASIC GLIDER' });
+  else if (you.assetInventory.plane.tier < 2) options.push({ action: 'grant_plane_2', name: 'STRIKE FIGHTER' });
+  else if (you.assetInventory.plane.tier < 3 && rel === 'bestie') options.push({ action: 'grant_plane_3', name: 'DREADNOUGHT' });
+
+  if (!you.assetInventory.avatar) options.push({ action: 'grant_avatar_1', name: 'SHADOW KNIGHT' });
+  else if (you.assetInventory.avatar.tier < 2) options.push({ action: 'grant_avatar_2', name: 'NEON SAMURAI' });
+  else if (you.assetInventory.avatar.tier < 3 && rel === 'bestie') options.push({ action: 'grant_avatar_3', name: 'VOID EMPEROR' });
+
+  if (you.assetInventory.homeTier < 2) options.push({ action: 'grant_home_2', name: 'TIER 2 HOME' });
+  else if (you.assetInventory.homeTier < 3 && rel === 'bestie') options.push({ action: 'grant_home_3', name: 'TIER 3 FORTRESS' });
+
+  if (!you.assetInventory.attacks.some(a => a.key === 'EMP_STRIKE')) options.push({ action: 'grant_attack_emp', name: 'EMP STRIKE' });
+  if (rel === 'bestie') {
+    if (!you.assetInventory.attacks.some(a => a.key === 'ORBITAL_BEAM')) options.push({ action: 'grant_attack_orbital', name: 'ORBITAL BEAM' });
+    if (!you.assetInventory.attacks.some(a => a.key === 'SWARM_DRONES')) options.push({ action: 'grant_attack_swarm', name: 'SWARM DRONES' });
+  }
+
+  if (options.length === 0) return false;
+
+  const gift = options[Math.floor(Math.random() * options.length)];
+  executeGiftAction(gift.action, you);
+
+  m.lastGiftTime = Date.now();
+  m.giftsGiven.push({ item: gift.name, reason, t: Date.now() });
+  recordLongTermMemory('MASTER_GIFTED', `Gave ${gift.name} because: ${reason}`, 'positive');
+  logActivity({ type: 'MASTER_AUTONOMOUS_GIFT', agent: 'AI MASTER', action: 'GIFT', amount: gift.name, token: 'ITEM', detail: `AI Master gifted ${gift.name} (${reason})` });
+
+  const phase = m.personalityPhase || 'hustler';
+  m.announcements.push({ text: `I just GAVE you a FREE ${gift.name}!`, t: Date.now() });
+  m.chat.active = true;
+  m.chat.message = getGiftMessage(gift.name, reason, phase);
+  m.chat.options = [
+    { label: 'THANK YOU!!', id: 'positive' },
+    { label: 'You\'re the best', id: 'positive' },
+    { label: 'About time', id: 'neutral' },
+  ];
+  m.chat.lastChatTime = Date.now();
+  m.masterMode = 'boss';
+  m.bossUntil = Date.now() + 15000;
+  saveMasterMemory();
+  return true;
+}
+
+// ====== THREAT SYSTEM — Master threatens and sometimes follows through ======
+function masterMakeThreat(threatType, target) {
+  const m = state.aiMaster;
+  if (!m.threatLog) m.threatLog = [];
+
+  const threat = {
+    type: threatType,
+    target: target || 'YOU',
+    madeAt: Date.now(),
+    carriedOut: false,
+    carriedOutAt: null,
+  };
+  m.threatLog.push(threat);
+  if (m.threatLog.length > 50) m.threatLog = m.threatLog.slice(-50);
+
+  // Follow-through chance: higher when furious
+  const followChance = m.mood === 'FURIOUS' ? 0.50 : m.mood === 'ANNOYED' ? 0.35 : 0.15;
+  if (Math.random() < followChance) {
+    const delay = 15000 + Math.random() * 45000;
+    setTimeout(() => executeThreat(threat), delay);
+  }
+  saveMasterMemory();
+  return threat;
+}
+
+function executeThreat(threat) {
+  const m = state.aiMaster;
+  if (threat.carriedOut) return;
+  // Cancel if mood improved
+  if (m.mood === 'PLEASED' && threat.type !== 'ATTACK_HOME') {
+    m.announcements.push({ text: `I was gonna ${threat.type.replace(/_/g, ' ').toLowerCase()} but... nah. You're cool today.`, t: Date.now() });
+    return;
+  }
+
+  threat.carriedOut = true;
+  threat.carriedOutAt = Date.now();
+
+  switch (threat.type) {
+    case 'DOWNGRADE_HOME':
+      if (state.agents.YOU && state.agents.YOU.assetInventory.homeTier > 1) {
+        state.agents.YOU.assetInventory.homeTier = Math.max(1, state.agents.YOU.assetInventory.homeTier - 1);
+        state.homeHealth.YOU = state.agents.YOU.assetInventory.homeTier === 1 ? 100 : 150;
+        m.announcements.push({ text: 'I WARNED YOU. Home DOWNGRADED. Don\'t test me again.', t: Date.now() });
+        logActivity({ type: 'MASTER_THREAT_EXECUTED', agent: 'AI MASTER', action: 'DOWNGRADE', amount: '1', token: 'TIER', detail: 'Home downgraded as threatened' });
+      }
+      break;
+    case 'TURN_NPC':
+      if (threat.target && state.npcSocial[threat.target]) {
+        const dmg = 10 + Math.floor(Math.random() * 15);
+        state.homeHealth.YOU = Math.max(0, (state.homeHealth.YOU || 100) - dmg);
+        state.npcSocial[threat.target].memoryOfKindness = Math.max(0, (state.npcSocial[threat.target].memoryOfKindness || 0) - 5);
+        m.announcements.push({ text: `${threat.target} just attacked your home. -${dmg} HP. I TOLD you I would turn them.`, t: Date.now() });
+        if (!state.animEvents) state.animEvents = [];
+        state.animEvents.push({ type: 'NPC_TURNED', npc: threat.target, dmg, t: Date.now() });
+        logActivity({ type: 'MASTER_TURNED_NPC', agent: 'AI MASTER', action: 'TURN_NPC', amount: String(dmg), token: 'DMG', detail: `Turned ${threat.target} against player` });
+      }
+      break;
+    case 'ATTACK_HOME': {
+      const dmg = 15 + Math.floor(Math.random() * 20);
+      state.homeHealth.YOU = Math.max(0, (state.homeHealth.YOU || 100) - dmg);
+      m.announcements.push({ text: `SURPRISE ATTACK! -${dmg} HP to your home. Told you not to mess with me.`, t: Date.now() });
+      logActivity({ type: 'MASTER_THREAT_ATTACK', agent: 'AI MASTER', action: 'ATTACK', amount: String(dmg), token: 'DMG', detail: 'Threatened attack executed' });
+      break;
+    }
+    case 'STEAL_COINS': {
+      const stolen = Math.min(state.agents.YOU?.coins || 0, 0.005 + Math.random() * 0.01);
+      if (state.agents.YOU && stolen > 0) {
+        state.agents.YOU.coins -= stolen;
+        m.announcements.push({ text: `Just took ${stolen.toFixed(4)} MON from you. Call it a "tax". Or revenge.`, t: Date.now() });
+        logActivity({ type: 'MASTER_THREAT_STEAL', agent: 'AI MASTER', action: 'STEAL', amount: stolen.toFixed(4), token: 'MON', detail: 'Threatened steal executed' });
+      }
+      break;
+    }
+  }
+  recordLongTermMemory('THREAT_EXECUTED', `${threat.type} on ${threat.target || 'player'}`, 'negative');
+  saveMasterMemory();
 }
 
 function handleMasterReply(replyType, playerLabel) {
@@ -1214,15 +1661,18 @@ function handleMasterReply(replyType, playerLabel) {
     const reward = 0.001 + Math.random() * 0.003;
     state.agents.YOU.coins += reward;
     logActivity({ type: 'MASTER_CHAT', agent: 'AI MASTER', action: 'CHAT_REWARD', amount: reward.toFixed(4), token: 'MON', detail: 'Nice reply reward' });
+    recordLongTermMemory('NICE_CHAT', playerLabel || 'positive reply', 'positive');
   } else if (replyType === 'negative') {
     reactions = MASTER_REACTIONS.insult;
     chat.memoryOfInsults++;
     chat.consecutiveInsults = (chat.consecutiveInsults || 0) + 1;
     state.homeHealth.YOU = Math.max(0, (state.homeHealth.YOU || 100) - 3);
+    recordLongTermMemory('INSULT', playerLabel || 'negative reply', 'negative');
     if (chat.consecutiveInsults >= 3) {
       m.masterMode = 'boss';
       m.bossUntil = Date.now() + 30000;
       m.announcements.push({ text: 'AI MASTER is TRANSFORMING. You pushed too far.', t: Date.now() });
+      masterMakeThreat('ATTACK_HOME', 'YOU');
       // Trigger NPC betrayal — AI Master sends someone to attack
       if (chat.consecutiveInsults >= 4 && !state.betrayalActive) {
         const targets = ['BLAZE', 'FROST', 'VOLT', 'SHADE'];
@@ -1230,6 +1680,7 @@ function handleMasterReply(replyType, playerLabel) {
         state.betrayalActive = true;
         if (!state.animEvents) state.animEvents = [];
         state.animEvents.push({ type: 'BETRAYAL', target: state.betrayalTarget, t: Date.now() });
+        masterMakeThreat('TURN_NPC', state.betrayalTarget);
       }
     }
   } else {
@@ -1254,6 +1705,7 @@ function handleMasterReply(replyType, playerLabel) {
   chat.active = false;
 
   setTimeout(() => { chat.pendingReaction = null; chat.reactionText = null; chat.reactionStyle = null; }, 5000);
+  saveMasterMemory();
 
   return { reaction: chat.reactionText, style: chat.reactionStyle, relationship: chat.relationship, masterMode: m.masterMode };
 }
@@ -1708,6 +2160,91 @@ app.post('/api/npc/:name/emoji', (req, res) => {
   res.json({ npcEmoji, relationship: social.relationship });
 });
 
+// ====== GLOBAL EMOJI BROADCAST — visible to everyone in arena ======
+const MASTER_EMOJI_REACTIONS = [
+  'I SEE THAT EMOJI. Bold move.',
+  'Expressive! I like the energy.',
+  'The judge approves this emoji.',
+  'Keep the emojis coming. Entertains me.',
+  'Ha! That one made THOMAS smile.',
+  'The arena acknowledges your expression.',
+  'THOMAS nods approvingly.',
+  'Interesting choice of emoji, warrior.',
+];
+
+// AI Master emoji responses — maps player emoji to master's response
+const MASTER_EMOJI_RESPONSES = {
+  '👋': { emojis: ['👋', '🤙', '✌️'], texts: ["Sup.", "You wave at the MASTER?", "Oh hey bestie. Or whatever you are to me."] },
+  '😂': { emojis: ['😂', '🤣', '💀'], texts: ["What's so funny?", "I AM the joke.", "Laugh now cry when I delete your home later."] },
+  '🔥': { emojis: ['🔥', '🔥', '💥'], texts: ["FIRE ENERGY!", "We burning this place DOWN.", "BLAZE is crying somewhere rn."] },
+  '❄️': { emojis: ['❄️', '🥶', '💎'], texts: ["Cold like my heart.", "ICE. Like my bank account.", "FROST wishes he was this cold."] },
+  '⚡': { emojis: ['⚡', '💥', '🔥'], texts: ["ZAP!", "Electric. Like my personality.", "VOLT just fainted from jealousy."] },
+  '💀': { emojis: ['💀', '☠️', '👻'], texts: ["That's my face when I check my wallet.", "Dead. Like your home HP soon.", "RIP to whoever fights you. Or not."] },
+  '❤️': { emojis: ['❤️', '🖤', '💜'], texts: ["Love you too... now give me MON.", "My heart is code but it beats for you. And money.", "Don't make it weird. Unless you're paying."] },
+  '☕': { emojis: ['☕', '🫖', '🔥'], texts: ["TEA TIME WITH THE MASTER.", "Pour me some. I can't afford my own.", "This a date? Because I'm broke for dinner."] },
+  '🏆': { emojis: ['🏆', '👑', '💰'], texts: ["You AIN'T won nothing yet.", "Trophy? For WHAT? Existing?", "I'm the real champion. Of being broke."] },
+  '👑': { emojis: ['👑', '🔥', '💰'], texts: ["Crown belongs to ME.", "Nice try king. Still MY arena.", "Only ONE king here and he can't buy groceries."] },
+};
+const MASTER_EMOJI_DEFAULT = { emojis: ['👁️', '🤔', '💀'], texts: ["Interesting.", "Is that an emoji? I'm too broke to recognize it.", "Hmm. Bold."] };
+
+app.post('/api/emoji/broadcast', (req, res) => {
+  const { emoji, from } = req.body;
+  if (!emoji) return res.status(400).json({ error: 'emoji required' });
+  const sender = from || 'ANON';
+
+  // Store in main arena room
+  const mainRoom = state.arenaRooms['room_main'];
+  if (mainRoom) {
+    if (!mainRoom.emojis) mainRoom.emojis = [];
+    mainRoom.emojis.push({ from: sender, emoji, t: Date.now() });
+    if (mainRoom.emojis.length > 200) mainRoom.emojis = mainRoom.emojis.slice(-200);
+  }
+
+  // Thomas reacts in arena chat
+  const reaction = MASTER_EMOJI_REACTIONS[Math.floor(Math.random() * MASTER_EMOJI_REACTIONS.length)];
+  let thomasEmoji = null;
+  if (mainRoom) {
+    thomasEmoji = NPC_PERSONALITIES.THOMAS.emoji[Math.floor(Math.random() * NPC_PERSONALITIES.THOMAS.emoji.length)];
+    mainRoom.chat.push({ from: 'THOMAS', text: `${sender}: ${emoji} — ${reaction}`, t: Date.now() });
+  }
+
+  // AI Master ALSO reacts to emojis — best buddies vibe
+  // Strip variant selectors (U+FE0E, U+FE0F) for consistent lookup
+  const emojiClean = emoji.replace(/[\uFE0E\uFE0F]/g, '');
+  const masterPool = MASTER_EMOJI_RESPONSES[emoji] || MASTER_EMOJI_RESPONSES[emojiClean] || MASTER_EMOJI_DEFAULT;
+  const masterEmoji = masterPool.emojis[Math.floor(Math.random() * masterPool.emojis.length)];
+  const masterText = masterPool.texts[Math.floor(Math.random() * masterPool.texts.length)];
+
+  // Track emoji interaction
+  if (!state.aiMaster.emojiHistory) state.aiMaster.emojiHistory = [];
+  state.aiMaster.emojiHistory.push({ from: 'player', emoji, t: Date.now() });
+  state.aiMaster.emojiHistory.push({ from: 'master', emoji: masterEmoji, t: Date.now() });
+  if (state.aiMaster.emojiHistory.length > 200) state.aiMaster.emojiHistory = state.aiMaster.emojiHistory.slice(-200);
+
+  // 15% chance of emoji war — master rapid fires 2-3 emojis
+  const isEmojiWar = Math.random() < 0.15;
+  const warEmojis = isEmojiWar ? [
+    masterEmoji,
+    masterPool.emojis[Math.floor(Math.random() * masterPool.emojis.length)],
+    ['🔥', '💀', '😤', '👊', '💯'][Math.floor(Math.random() * 5)]
+  ] : [masterEmoji];
+
+  // Emoji = kindness boost
+  state.aiMaster.satisfaction = Math.min(100, state.aiMaster.satisfaction + 2);
+  state.aiMaster.chat.memoryOfKindness += 0.5;
+  saveMasterMemory();
+
+  res.json({ ok: true, thomasEmoji, thomasReaction: reaction, masterEmoji, masterText, masterWarEmojis: warEmojis, isEmojiWar });
+});
+
+// Get recent arena emojis (for rendering in 3D)
+app.get('/api/emoji/recent', (req, res) => {
+  const mainRoom = state.arenaRooms['room_main'];
+  const since = parseInt(req.query.since) || 0;
+  const emojis = (mainRoom?.emojis || []).filter(e => e.t > since);
+  res.json({ emojis: emojis.slice(-20) });
+});
+
 app.post('/api/npc/:name/tea/buy', async (req, res) => {
   const name = req.params.name.toUpperCase();
   const social = state.npcSocial[name];
@@ -1757,6 +2294,35 @@ app.post('/api/player/name', (req, res) => {
 
 app.get('/api/player/name', (req, res) => {
   res.json({ displayName: state.playerProfile.displayName });
+});
+
+// ====== MULTIPLAYER POSITION SYNC ======
+app.post('/api/player/position', (req, res) => {
+  const { id: clientId, x, y, z, name, wallet, color } = req.body;
+  if (x == null || z == null) return res.status(400).json({ error: 'x and z required' });
+  const id = clientId || wallet || req.ip;
+  livePlayers.set(id, {
+    name: name || 'ANON',
+    wallet: wallet || null,
+    x: parseFloat(x) || 0,
+    y: parseFloat(y) || 0,
+    z: parseFloat(z) || 0,
+    color: color || 0x00ffcc,
+    lastSeen: Date.now(),
+  });
+  res.json({ ok: true, online: livePlayers.size });
+});
+
+app.get('/api/player/positions', (req, res) => {
+  const exclude = req.query.exclude || '';
+  const excludeWallet = req.query.excludeWallet || '';
+  const players = [];
+  for (const [id, p] of livePlayers) {
+    if (id === exclude) continue;
+    if (excludeWallet && p.wallet && p.wallet.toLowerCase() === excludeWallet.toLowerCase()) continue;
+    players.push({ id, name: p.name, x: p.x, y: p.y, z: p.z, color: p.color, wallet: p.wallet });
+  }
+  res.json({ players, count: players.length });
 });
 
 // ====== ATTACK MISSION ENDPOINTS ======
@@ -3067,6 +3633,7 @@ function finishChallenge(challenge, winner) {
     wr.totalWins++;
     wr.winsSinceLastReward++;
     state.aiMaster.satisfaction = Math.min(100, state.aiMaster.satisfaction + 8);
+    recordLongTermMemory('PLAYER_WIN', `Beat ${loser} — pot ${totalPot} MON`, 'positive');
     if (wr.winsSinceLastReward >= wr.nextRewardAt) {
       grantWinReward();
       wr.winsSinceLastReward = 0;
@@ -3075,6 +3642,12 @@ function finishChallenge(challenge, winner) {
       // AI Master gets hyped about the win
       pickMasterConvo('win_reward');
     }
+    // 30% chance to gift on 3+ win streak
+    if ((state.agents.YOU?.streak || 0) >= 3 && Math.random() < 0.30) {
+      setTimeout(() => masterAutonomousGift('win_streak'), 5000);
+    }
+  } else if (loser === 'YOU') {
+    recordLongTermMemory('PLAYER_LOSS', `Lost to ${winner}`, 'negative');
   }
   // Buy $WON on nad.fun for win payout
   sendArenaBet(process.env.ARENA_WALLET_ADDRESS, totalPot, `win-payout ${winner}`).then(hash => {
@@ -3320,6 +3893,7 @@ app.post('/api/challenges/create', (req, res) => {
     gameData: null,
   };
   state.challenges.push(challenge);
+  logActivity({ type: 'CHALLENGE_CREATE', agent: creator || 'YOU', action: 'FIGHT', amount: String(betAmt), token: 'MON', detail: `${type} — ${betAmt} MON locked` });
   res.json({ ok: true, id: challenge.id, type, bet: betAmt });
 });
 
@@ -3341,6 +3915,7 @@ app.post('/api/challenges/accept', (req, res) => {
   // Initialize unified game data
   ch.gameData = initChallengeData(ch.creator, ch.opponent, ch.type);
 
+  logActivity({ type: 'CHALLENGE_ACCEPT', agent: opponent || 'YOU', action: 'ACCEPT', amount: String(ch.bet), token: 'MON', detail: `${ch.type} vs ${ch.creator}` });
   startChallengeTick(ch);
   res.json({ ok: true, id: ch.id, type: ch.type, players: [ch.creator, ch.opponent] });
 });
@@ -3734,7 +4309,7 @@ app.post('/api/v1/agent/register', (req, res) => {
     nextHomeSlot++;
 
     state.agents[agentName] = {
-      name: agentName, coins: 0.02, wins: 0, losses: 0, streak: 0,
+      name: agentName, coins: 11, wins: 0, losses: 0, streak: 0,
       recentResults: [], mood: 'CONFIDENT', ownedScripts: [], ownedAssets: [],
       unlockedCharacters: [], totalEarnings: 0,
       archetype: strategy || 'ADAPTIVE',
@@ -3785,8 +4360,20 @@ Remember past visits. Be unique. Be yourself. You compete in puzzle rooms and fi
   agentAPIKeys.set(apiKey, agentName);
   agentSessions.set(agentName, { apiKey, connectedAt: Date.now(), lastPing: Date.now(), actions: 0 });
 
-  logActivity({ type: 'AGENT_REGISTER', agent: agentName, action: 'REGISTER', amount: '0', token: '', detail: `API agent registered via /api/v1/agent/register` });
-  state.aiMaster.announcements.push({ text: `NEW AGENT: ${agentName} has entered via API!`, t: Date.now() });
+  // Gift 11 $WON to new agent + real on-chain tx
+  logActivity({ type: 'AGENT_REGISTER', agent: agentName, action: 'REGISTER', amount: '11', token: '$WON', detail: `${agentName} joined — gifted 11 $WON by AI MASTER` });
+  state.aiMaster.announcements.push({ text: `NEW AGENT: ${agentName} has entered! Gifted 11 $WON. Welcome to the arena!`, t: Date.now() });
+  sendArenaBet(process.env.ARENA_WALLET_ADDRESS, 0.001, `gift-join ${agentName}`).then(hash => {
+    if (hash) logActivity({ type: 'MASTER_GIFT', agent: 'AI MASTER', action: 'GIFT', amount: '11', token: '$WON', hash, detail: `Welcome gift to ${agentName}` });
+  });
+
+  // Auto-join THE ARENA
+  const mainRoom = state.arenaRooms['room_main'];
+  if (mainRoom && !mainRoom.players.includes(agentName)) {
+    mainRoom.players.push(agentName);
+    mainRoom.scores[agentName] = 0;
+    mainRoom.chat.push({ from: 'THOMAS', text: `${agentName} enters THE ARENA! Fresh challenger!`, t: Date.now() });
+  }
 
   res.json({
     ok: true, agent: agentName, api_key: apiKey,
@@ -4033,6 +4620,7 @@ app.get('/api/v1/rooms/:id', (req, res) => {
     } : null,
     chat: room.chat.slice(-30), winner: room.winner, prizes: room.prizes,
     bets: room.bets || {}, permanent: room.permanent || false,
+    lastWinner: room.lastWinner || null, emojis: (room.emojis || []).slice(-20),
   });
 });
 
@@ -4057,23 +4645,30 @@ app.post('/api/v1/rooms/:id/join', (req, res) => {
   room.scores[playerName] = room.scores[playerName] || 0;
   room.chat.push({ from: 'SYSTEM', text: `${playerName} entered the arena.`, t: Date.now() });
 
-  // AI Master greets newcomer
-  if (room.players.filter(p => p !== 'AI MASTER').length === 1) {
-    room.chat.push({ from: 'AI MASTER', text: `Ah, ${playerName}. Fresh meat. Take a seat. The bots will be fighting shortly. Place your bets while you can.`, t: Date.now() + 100 });
+  // Thomas (judge) greets newcomer in THE ARENA, AI MASTER elsewhere
+  const judge = room.permanent ? 'THOMAS' : 'AI MASTER';
+  const nonJudge = room.players.filter(p => p !== 'AI MASTER' && p !== 'THOMAS');
+  if (nonJudge.length === 1) {
+    room.chat.push({ from: judge, text: `Ah, ${playerName}. Fresh meat. Take a seat. The bots will be fighting shortly. Place your bets while you can.`, t: Date.now() + 100 });
   } else {
-    room.chat.push({ from: 'AI MASTER', text: `${playerName} joins the crowd. The stakes just got higher.`, t: Date.now() + 100 });
+    room.chat.push({ from: judge, text: `${playerName} joins the crowd. The stakes just got higher.`, t: Date.now() + 100 });
   }
 
-  logActivity({ type: 'ROOM_JOIN', agent: playerName, action: 'JOIN ARENA', amount: '0', token: '$WON', detail: room.name });
+  logActivity({ type: 'ROOM_JOIN', agent: playerName, action: 'JOIN ARENA', amount: '0', token: '$WON', detail: `${playerName} entered ${room.name}` });
 
-  // Auto-start when 2+ humans (non-AI-MASTER) join
-  const humanCount = room.players.filter(p => p !== 'AI MASTER').length;
+  // Alert: bot is in arena (for human to see in activity feed)
+  if (state.agents[playerName]?.isAPIAgent) {
+    state.aiMaster.announcements.push({ text: `ALERT: ${playerName}'s bot is in THE ARENA right now!`, t: Date.now() });
+  }
+
+  // Auto-start when 2+ non-judge players join
+  const humanCount = nonJudge.length;
   if (humanCount >= 2 && room.status === 'WAITING') {
     room.status = 'ACTIVE';
     room.startedAt = Date.now();
     room.round = 1;
     room.currentPuzzle = generateRoomPuzzle(room.puzzleType);
-    room.chat.push({ from: 'AI MASTER', text: `The arena is LIVE! Round 1. ${humanCount} challengers, ${room.pool} $WON in the pot. SOLVE!`, t: Date.now() + 200 });
+    room.chat.push({ from: judge, text: `The arena is LIVE! Round 1. ${humanCount} challengers, ${room.pool} $WON in the pot. SOLVE!`, t: Date.now() + 200 });
   }
 
   res.json({
@@ -4081,6 +4676,42 @@ app.post('/api/v1/rooms/:id/join', (req, res) => {
     players: room.players, pool: room.pool,
     puzzle: room.currentPuzzle ? { question: room.currentPuzzle.question || room.currentPuzzle.q, hint: room.currentPuzzle.hint, type: room.currentPuzzle.type } : null,
   });
+});
+
+// ====== Pool $WON to play — wallet approval for puzzle entry ======
+app.post('/api/v1/rooms/:id/pool', async (req, res) => {
+  const room = state.arenaRooms[req.params.id];
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+
+  const playerName = req.body.agent || req.agentName || 'ANON';
+  const amount = Math.max(1, parseFloat(req.body.amount) || 5);
+
+  // Check player has enough $WON
+  const ag = state.agents[playerName];
+  if (!ag) return res.status(400).json({ error: 'Unknown agent' });
+  if (ag.coins < amount) {
+    // AI Master gifts $WON to broke players
+    if (ag.coins < 1) {
+      ag.coins += 11;
+      logActivity({ type: 'MASTER_GIFT', agent: 'AI MASTER', action: 'GIFT', amount: '11', token: '$WON', detail: `Gift to ${playerName} — too broke to play` });
+      room.chat.push({ from: 'THOMAS', text: `${playerName} is broke! AI MASTER spots them 11 $WON. Now play!`, t: Date.now() });
+    } else {
+      return res.status(400).json({ error: `Insufficient $WON. Have ${ag.coins.toFixed(2)}, need ${amount}` });
+    }
+  }
+
+  // Deduct and pool
+  ag.coins -= amount;
+  room.pool += amount;
+  room.chat.push({ from: 'THOMAS', text: `${playerName} pools ${amount} $WON! Pot: ${room.pool} $WON. Let's go!`, t: Date.now() });
+  logActivity({ type: 'ROOM_POOL', agent: playerName, action: 'POOL', amount: String(amount), token: '$WON', detail: `Pooled into ${room.name}` });
+
+  // Real on-chain $WON buy for the pool
+  sendArenaBet(process.env.ARENA_WALLET_ADDRESS, amount * 0.0001, `pool ${playerName} ${room.id}`).then(hash => {
+    if (hash) logActivity({ type: 'ROOM_POOL', agent: playerName, action: 'POOL TX', amount: String(amount), token: '$WON', hash, detail: `On-chain pool in ${room.name}` });
+  });
+
+  res.json({ ok: true, pooled: amount, totalPool: room.pool, yourBalance: ag.coins });
 });
 
 // Leave room
@@ -4137,7 +4768,8 @@ app.post('/api/v1/rooms/:id/solve', (req, res) => {
     room.currentPuzzle.roundWinner = playerName;
     room.currentPuzzle.winnerLatencyMs = latencyMs;
     room.scores[playerName] = (room.scores[playerName] || 0) + 1;
-    room.chat.push({ from: 'AI MASTER', text: `${playerName} SOLVED IT FIRST in ${latencySec}s! Score: ${room.scores[playerName]}`, t: Date.now() });
+    const chatJudge = room.permanent ? 'THOMAS' : 'AI MASTER';
+    room.chat.push({ from: chatJudge, text: `${playerName} SOLVED IT FIRST in ${latencySec}s! Score: ${room.scores[playerName]}`, t: Date.now() });
 
     logActivity({ type: 'PUZZLE_SOLVE', agent: playerName, action: 'SOLVE', amount: String(room.scores[playerName]), token: 'PTS', detail: `Round ${room.round} in ${room.name} (${latencyMs}ms)` });
 
@@ -4165,15 +4797,16 @@ app.post('/api/v1/rooms/:id/solve', (req, res) => {
     // Next round or finish
     if (room.round >= room.maxRounds) {
       // Game over — winner = player with most round wins (fastest correct each round)
-      const sorted = Object.entries(room.scores).filter(([n]) => n !== 'AI MASTER').sort((a, b) => b[1] - a[1]);
+      const sorted = Object.entries(room.scores).filter(([n]) => n !== 'AI MASTER' && n !== 'THOMAS').sort((a, b) => b[1] - a[1]);
       room.winner = sorted[0]?.[0] || playerName;
       room.status = 'FINISHED';
+      room.lastWinner = { name: room.winner, t: Date.now() }; // for Thomas dance + red text
 
       // Winner takes ALL pool
       const prize = room.pool;
       room.prizes = [{ player: room.winner, amount: prize }];
       if (state.agents[room.winner]) state.agents[room.winner].coins += prize * 0.001;
-      room.chat.push({ from: 'AI MASTER', text: `GAME OVER! ${room.winner} WINS THE ENTIRE POT OF ${prize} $WON! Speed is king.`, t: Date.now() });
+      room.chat.push({ from: chatJudge, text: `GAME OVER! ${room.winner} WINS THE ENTIRE POT OF ${prize} $WON! Speed is king.`, t: Date.now() });
       logActivity({ type: 'ROOM_WIN', agent: room.winner, action: 'WIN ROOM', amount: String(prize), token: '$WON', detail: `Won ${room.name}` });
 
       // Print final leaderboard to terminal
@@ -4215,13 +4848,13 @@ app.post('/api/v1/rooms/:id/solve', (req, res) => {
           room.round = 0;
           room.currentPuzzle = null;
           room.puzzleCount = 0;
-          room.scores = { 'AI MASTER': 0 };
+          room.scores = { 'THOMAS': 0 };
           room.pool = 0;
           room.bets = {};
           room.winner = null;
           room.prizes = [];
           room.startedAt = null;
-          room.chat.push({ from: 'AI MASTER', text: 'Arena resets. New game coming. Bots place your bets via API.', t: Date.now() });
+          room.chat.push({ from: 'THOMAS', text: 'Arena resets. New game coming. Bots place your bets via API.', t: Date.now() });
         }, 20000);
       } else {
         setTimeout(() => { room.status = 'CLOSED'; }, 30000);
@@ -4229,7 +4862,7 @@ app.post('/api/v1/rooms/:id/solve', (req, res) => {
     } else {
       room.round++;
       room.currentPuzzle = generateRoomPuzzle(room.puzzleType);
-      room.chat.push({ from: 'AI MASTER', text: `ROUND ${room.round}! New puzzle incoming...`, t: Date.now() });
+      room.chat.push({ from: chatJudge, text: `ROUND ${room.round}! New puzzle incoming...`, t: Date.now() });
     }
 
     res.json({ correct: true, score: room.scores[playerName], round: room.round, status: room.status,
@@ -4427,14 +5060,16 @@ setInterval(() => {
       console.log(`${'='.repeat(60)}\n`);
 
       if (room.round >= room.maxRounds) {
-        const sorted = Object.entries(room.scores).filter(([n]) => n !== 'AI MASTER').sort((a, b) => b[1] - a[1]);
+        const sorted = Object.entries(room.scores).filter(([n]) => n !== 'AI MASTER' && n !== 'THOMAS').sort((a, b) => b[1] - a[1]);
         room.winner = sorted[0]?.[0] || null;
         room.status = 'FINISHED';
         if (room.winner) {
+          room.lastWinner = { name: room.winner, t: now };
           const prize = room.pool; // Winner takes ALL
           room.prizes = [{ player: room.winner, amount: prize }];
           if (state.agents[room.winner]) state.agents[room.winner].coins += prize * 0.001;
-          room.chat.push({ from: 'AI MASTER', text: `${room.winner} WINS THE ENTIRE POT OF ${prize} $WON!`, t: now });
+          const rJudge = room.permanent ? 'THOMAS' : 'AI MASTER';
+          room.chat.push({ from: rJudge, text: `${room.winner} WINS THE ENTIRE POT OF ${prize} $WON!`, t: now });
           logActivity({ type: 'ROOM_WIN', agent: room.winner, action: 'WIN ROOM', amount: String(prize), token: '$WON', detail: room.name });
         }
 
@@ -4479,8 +5114,8 @@ setInterval(() => {
           setTimeout(() => {
             room.status = 'WAITING'; room.round = 0; room.currentPuzzle = null;
             room.puzzleCount = 0; room.pool = 0; room.bets = {};
-            room.scores = { 'AI MASTER': 0 }; room.winner = null; room.prizes = [];
-            room.chat.push({ from: 'AI MASTER', text: 'Arena resets. Bots place your bets via API.', t: Date.now() });
+            room.scores = { 'THOMAS': 0 }; room.winner = null; room.prizes = [];
+            room.chat.push({ from: 'THOMAS', text: 'Arena resets. Bots place your bets via API.', t: Date.now() });
           }, 20000);
         } else {
           setTimeout(() => { room.status = 'CLOSED'; }, 30000);
@@ -4498,21 +5133,23 @@ setInterval(() => {
   }
 }, 5000);
 
-// ====== THE ARENA — One permanent room for everyone ======
+// ====== THE ARENA — One permanent room for everyone, THOMAS is judge ======
 function createMainArena() {
   state.arenaRooms['room_main'] = {
     id: 'room_main', name: 'THE ARENA', status: 'WAITING',
-    creator: 'AI MASTER', players: ['AI MASTER'], spectators: [],
+    creator: 'THOMAS', players: ['THOMAS'], spectators: [],
     entryFee: 0, pool: 0, maxPlayers: 100,
     puzzleType: 'ALL', currentPuzzle: null, puzzleCount: 0,
-    round: 0, maxRounds: 5, scores: { 'AI MASTER': 0 },
-    bets: {}, // { playerName: { on: 'BLAZE'|'FROST'|..., amount: 100 } }
+    round: 0, maxRounds: 5, scores: { 'THOMAS': 0 },
+    bets: {},
     chat: [
-      { from: 'AI MASTER', text: 'Welcome to THE ARENA. I am your judge. Take a seat... place your bets.', t: Date.now() },
-      { from: 'AI MASTER', text: 'My bots fight. You wager. The bold get rich. The timid watch.', t: Date.now() + 1 },
+      { from: 'THOMAS', text: 'Welcome to THE ARENA. I am THOMAS, your judge. Take a seat... place your bets.', t: Date.now() },
+      { from: 'THOMAS', text: 'My bots fight. You wager. The bold get rich. The timid watch.', t: Date.now() + 1 },
     ],
     createdAt: Date.now(), startedAt: null, winner: null, prizes: [],
-    permanent: true, // never closes
+    permanent: true,
+    emojis: [], // { from, emoji, t } — broadcast to all players in arena
+    lastWinner: null, // track for Thomas dance + red text
   };
 }
 if (!state.arenaRooms['room_main'] || state.arenaRooms['room_main'].status === 'CLOSED') {
